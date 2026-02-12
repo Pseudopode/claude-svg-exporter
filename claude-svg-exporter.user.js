@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude SVG to PNG Exporter
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
+// @version      1.1.0
 // @description  Export Claude AI SVG artifacts to high-resolution PNG with one click
 // @author       Your Name
 // @match        https://claude.ai/*
@@ -24,6 +24,7 @@
     let currentQuality = '2x';
     let exportButton = null;
     let qualitySelector = null;
+    let wasInPreviewMode = false;
 
     // Create the export UI
     function createExportUI() {
@@ -98,31 +99,54 @@
         return container;
     }
 
+    // Switch to Code view to access SVG
+    function switchToCodeView() {
+        const codeButton = Array.from(document.querySelectorAll('button, [role="radio"]')).find(
+            btn => btn.textContent === 'Code' || btn.getAttribute('aria-label')?.includes('Code')
+        );
+        
+        if (codeButton) {
+            const previewButton = Array.from(document.querySelectorAll('button, [role="radio"]')).find(
+                btn => btn.textContent === 'Aperçu' || btn.textContent === 'Preview'
+            );
+            wasInPreviewMode = previewButton?.getAttribute('aria-checked') === 'true';
+            
+            codeButton.click();
+            return true;
+        }
+        return false;
+    }
+
+    // Switch back to Preview view
+    function switchToPreviewView() {
+        if (wasInPreviewMode) {
+            const previewButton = Array.from(document.querySelectorAll('button, [role="radio"]')).find(
+                btn => btn.textContent === 'Aperçu' || btn.textContent === 'Preview'
+            );
+            if (previewButton) {
+                previewButton.click();
+            }
+        }
+        wasInPreviewMode = false;
+    }
+
     // Get SVG code from the artifact viewer
     function getSVGCode() {
-        // Try to get from Code view
+        // Try to get from Code view first
         const codeEditor = document.querySelector('pre code') || 
                           document.querySelector('pre') || 
-                          document.querySelector('[class*="code"]');
+                          Array.from(document.querySelectorAll('div')).find(
+                              div => div.textContent.includes('<svg') && div.textContent.includes('</svg>')
+                          );
         
         if (codeEditor && codeEditor.textContent.includes('<svg')) {
-            return codeEditor.textContent;
-        }
-
-        // Try to get from DOM
-        const artifactIframe = Array.from(document.querySelectorAll('iframe')).find(
-            iframe => iframe.getBoundingClientRect().width > 500
-        );
-
-        if (artifactIframe) {
-            try {
-                const svgElement = artifactIframe.contentDocument?.querySelector('svg');
-                if (svgElement) {
-                    return new XMLSerializer().serializeToString(svgElement);
-                }
-            } catch (e) {
-                console.log('Cannot access iframe content (CORS)');
+            const text = codeEditor.textContent;
+            // Extract just the SVG portion
+            const svgMatch = text.match(/<svg[\\s\\S]*<\\/svg>/);
+            if (svgMatch) {
+                return svgMatch[0];
             }
+            return text;
         }
 
         return null;
@@ -130,8 +154,22 @@
 
     // Generate filename from SVG title or artifact name
     function generateFilename() {
-        const titleElement = document.querySelector('[class*="artifact"] h1, [class*="artifact"] h2');
-        const title = titleElement?.textContent?.trim() || 'svg-export';
+        // Try to get the artifact title
+        const titleElement = document.querySelector('[class*="artifact"] [class*="title"]') ||
+                           document.querySelector('h1') ||
+                           document.querySelector('h2');
+        
+        let title = 'svg-export';
+        
+        if (titleElement) {
+            const text = titleElement.textContent.trim();
+            // Look for the artifact name (usually before "SVG" or other labels)
+            const match = text.match(/^([^·•\\n]+)/);
+            if (match) {
+                title = match[1].trim();
+            }
+        }
+        
         const timestamp = new Date().toISOString().slice(0, 10);
         const cleanTitle = title.toLowerCase()
             .replace(/[^a-z0-9]+/g, '-')
@@ -142,16 +180,27 @@
     }
 
     // Main export function
-    function exportSVGtoPNG() {
+    async function exportSVGtoPNG() {
+        exportButton.textContent = '⏳ Switching to Code view...';
+        exportButton.disabled = true;
+
+        // Switch to Code view to access SVG
+        switchToCodeView();
+        
+        // Wait for Code view to load
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
         const svgCode = getSVGCode();
         
         if (!svgCode) {
-            alert('No SVG found! Make sure an SVG artifact is visible or open the Code view.');
+            alert('No SVG found! Make sure an SVG artifact is visible.');
+            exportButton.textContent = '📥 Export SVG to PNG';
+            exportButton.disabled = false;
+            switchToPreviewView();
             return;
         }
 
-        exportButton.textContent = '⏳ Exporting...';
-        exportButton.disabled = true;
+        exportButton.textContent = '⏳ Converting...';
 
         const blob = new Blob([svgCode], { type: 'image/svg+xml;charset=utf-8' });
         const url = URL.createObjectURL(blob);
@@ -165,9 +214,9 @@
             let width, height;
 
             if (viewBoxMatch) {
-                const [, , , vbWidth, vbHeight] = viewBoxMatch[1].split(/\\s+/);
-                width = parseFloat(vbWidth);
-                height = parseFloat(vbHeight);
+                const parts = viewBoxMatch[1].split(/\\s+/);
+                width = parseFloat(parts[2]);
+                height = parseFloat(parts[3]);
             } else {
                 width = img.width;
                 height = img.height;
@@ -201,14 +250,16 @@
                 setTimeout(() => {
                     exportButton.textContent = '📥 Export SVG to PNG';
                     exportButton.disabled = false;
+                    switchToPreviewView();
                 }, 2000);
             }, 'image/png', 1.0);
         };
 
         img.onerror = function() {
-            alert('Error loading SVG. Try switching to Code view first.');
+            alert('Error loading SVG. Please try again.');
             exportButton.textContent = '📥 Export SVG to PNG';
             exportButton.disabled = false;
+            switchToPreviewView();
             URL.revokeObjectURL(url);
         };
 
@@ -217,19 +268,17 @@
 
     // Watch for SVG artifacts
     function checkForSVG() {
-        const artifactViewer = document.querySelector('[class*="artifact"]');
-        const svgIndicator = document.querySelector('[class*="SVG"]') || 
-                           document.querySelector('button:not([disabled])');
-        
-        const hasSVG = artifactViewer && (
-            document.querySelector('svg') ||
-            document.body.textContent.includes('SVG') ||
-            document.querySelector('[role="region"]')
-        );
+        // Look for SVG indicator in the page
+        const hasSVGArtifact = document.body.textContent.includes('SVG') && 
+                              (document.querySelector('[role="region"]') || 
+                               document.querySelector('iframe[title*="artifact"]') ||
+                               Array.from(document.querySelectorAll('*')).some(el => 
+                                   el.textContent.includes('Image') && el.textContent.includes('SVG')
+                               ));
 
         const ui = document.getElementById('svg-export-ui');
         
-        if (hasSVG && ui) {
+        if (hasSVGArtifact && ui) {
             ui.style.display = 'block';
         } else if (ui) {
             ui.style.display = 'none';
